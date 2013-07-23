@@ -415,3 +415,14 @@ def test_validate():
     with open(get_pkg_data_filename("data/validate.txt"), "r") as fd:
         assert set([x.strip() for x in fd.readlines()]) == set([
             x.strip() for x in results_txt.splitlines()])
+
+
+def test_scamp_sip_distortion_parameters():
+    """
+    Test parsing of WCS parameters with redundant SIP and SCAMP distortion
+    parameters.
+    """
+    header = get_pkg_data_contents('data/validate.fits', encoding='binary')
+    w = wcs.WCS(header)
+    # Just check that this doesn't raise an exception.
+    w.all_pix2world(0, 0, 0)
