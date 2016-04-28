@@ -25,6 +25,7 @@ from .transformations import TransformGraph
 from .representation import (BaseRepresentation, CartesianRepresentation,
                              SphericalRepresentation,
                              UnitSphericalRepresentation,
+                             HEALPixUnitSphericalRepresentation,
                              REPRESENTATION_CLASSES)
 
 
@@ -1078,6 +1079,22 @@ class BaseCoordinateFrame(object):
         # TODO: if representations are updated to use a full transform graph,
         #       the representation aliases should not be hard-coded like this
         return self.represent_as(SphericalRepresentation, in_frame_units=True)
+
+    def to_healpix(self, nside, nest=False):
+        """
+        Shorthand for a HEALPix representation of the coordinates in this object.
+
+        Parameters
+        ----------
+        nside : `int`
+            The HEALPix resolution.
+
+        nest : `bool`, optional, default `False`
+            The indexing scheme (`True` for "NESTED", `False` for "RING")
+        """
+
+        representation = HEALPixUnitSphericalRepresentation(nside, nest=nest)
+        return self.represent_as(representation)
 
 
 class GenericFrame(BaseCoordinateFrame):

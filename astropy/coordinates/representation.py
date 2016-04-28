@@ -9,9 +9,11 @@ from __future__ import (absolute_import, division, print_function,
 
 import abc
 import functools
+import contextlib
 from collections import OrderedDict
 
 import numpy as np
+import healpy as hp
 import astropy.units as u
 
 from .angles import Angle, Longitude, Latitude
@@ -21,7 +23,8 @@ from ..utils.compat.numpy import broadcast_arrays
 
 __all__ = ["BaseRepresentation", "CartesianRepresentation",
            "SphericalRepresentation", "UnitSphericalRepresentation",
-           "PhysicsSphericalRepresentation", "CylindricalRepresentation"]
+           "PhysicsSphericalRepresentation", "CylindricalRepresentation",
+           "HEALPixUnitSphericalRepresentation"]
 
 NUMPY_LT_1P7 = [int(x) for x in np.__version__.split('.')[:2]] < [1, 7]
 
@@ -58,6 +61,14 @@ def _fstyle(precision, x):
         return s_trunc + '0'
     else:
         return s_trunc
+
+
+@contextlib.contextmanager
+def printoptions(*args, **kwargs):
+    original = np.get_printoptions()
+    np.set_printoptions(*args, **kwargs)
+    yield
+    np.set_printoptions(**original)
 
 
 @six.add_metaclass(MetaBaseRepresentation)
@@ -101,6 +112,21 @@ class BaseRepresentation(object):
     @abc.abstractmethod
     def to_cartesian(self):
         raise NotImplementedError()
+
+    def to_healpix(self, nside, nest=False):
+        """
+        Convert to HEALPix coordinates.
+
+        Parameters
+        ----------
+        nside : `int`
+            The HEALPix resolution.
+
+        nest : `bool`, optional, default `False`
+            The indexing scheme (`True` for "NESTED", `False` for "RING")
+        """
+        representation = HEALPixUnitSphericalRepresentation(nside, nest=nest)
+        return self.represent_as(representation)
 
     @property
     def components(self):
@@ -377,8 +403,148 @@ class UnitSphericalRepresentation(BaseRepresentation):
             return other_class(phi=self.lon, theta=90 * u.deg - self.lat, r=1.0)
         elif issubclass(other_class, SphericalRepresentation):
             return other_class(lon=self.lon, lat=self.lat, distance=1.0)
+        elif issubclass(other_class, BaseHEALPixUnitSphericalRepresentation):
+            return other_class(hp.ang2pix(other_class.nside, 0.5 * np.pi - self.lat.to(u.rad).value, self.lon.to(u.rad).value, other_class.nest))
         else:
             return super(UnitSphericalRepresentation, self).represent_as(other_class)
+
+
+class MetaBaseHEALPixUnitSphericalRepresentation(MetaBaseRepresentation):
+    """
+    Container for class properties of representation of points on a unit sphere
+    in HEALPix coordinates.
+    """
+
+    @property
+    def order(cls):
+        """The HEALPix resolution order (the base 2 logarithm of `nside`)"""
+        return hp.nside2order(cls.nside)
+
+    @property
+    def npix(cls):
+        """The number of pixels in the unit sphere at the resolution `nside`"""
+        return hp.nside2npix(cls.nside)
+
+    @property
+    def pixarea(cls):
+        """The area per pixel at the resolution `nside`"""
+        return hp.nside2pixarea(cls.nside, degrees=True) * u.deg2
+
+
+class BaseHEALPixUnitSphericalRepresentation(object):
+    """
+    Base class for representation of points on a unit sphere in
+    HEALPix coordinates.
+
+    Parameters
+    ----------
+    ipix : `~np.ndarray`
+        The HEALPix pixel indices of the points.
+
+    nside : `int`
+        The HEALPix resolution.
+
+    nest : `bool`, optional, default `False`
+        The indexing scheme (`True` for "NESTED", `False` for "RING")
+
+    copy : bool, optional
+        If True arrays will be copied rather than referenced.
+    """
+
+    attr_classes = OrderedDict([('ipix', u.Quantity)])
+    recommended_units = {'ipix': u.dimensionless_unscaled}
+
+    def __init__(self, ipix, copy=True):
+        self._ipix = self.attr_classes['ipix'](ipix, unit=u.dimensionless_unscaled, dtype=np.intp, copy=copy)
+
+    def __str__(self):
+        with printoptions(precision=0):
+            return super(BaseHEALPixUnitSphericalRepresentation, self).__str__()
+
+    def __repr__(self):
+        with printoptions(precision=0):
+            return super(BaseHEALPixUnitSphericalRepresentation, self).__repr__()
+
+    @property
+    def ipix(self):
+        """
+        The HEALPix indices of the point(s).
+        """
+        return self._ipix
+
+    @ipix.setter
+    def ipix(self, ipix):
+        self._ipix = self.attr_classes['ipix'](ipix, unit=u.dimensionless_unscaled, dtype=np.intp)
+
+    def to_cartesian(self):
+        """
+        Converts spherical polar coordinates to 3D rectangular cartesian
+        coordinates.
+        """
+
+        print(self.nside, self.ipix)
+        x, y, z = hp.pix2vec(self.nside, np.asarray(self.ipix), self.nest)
+
+        return CartesianRepresentation(x=x*u.one, y=y*u.one, z=z*u.one)
+
+    @classmethod
+    def from_cartesian(cls, cart):
+        """
+        Converts 3D rectangular cartesian coordinates to spherical polar
+        coordinates.
+        """
+
+        ipix = hp.vec2pix(cls.nside, cart.x.value, cart.y.value, cart.z.value, cls.nest)
+
+        return cls(ipix)
+
+    def represent_as(self, other_class):
+        # Take a short cut if the other class is a spherical representation
+        if issubclass(other_class, UnitSphericalRepresentation):
+            theta, phi = hp.pix2ang(self.nside, np.asarray(self.ipix), self.nest)
+            return other_class(phi=phi, theta=theta, r=1.0)
+        elif issubclass(other_class, BaseHEALPixUnitSphericalRepresentation):
+            ipix = np.asarray(self.ipix)
+            if not self.nest:
+                ipix = hp.ring2nest(self.nside, ipix)
+            if other_class.nside > self.nside:
+                ipix = ipix * (other_class.nside // self.nside)**2
+            else:
+                ipix = ipix // (self.nside // other_class.nside)**2
+            if not other_class.nest:
+                ipix = hp.nest2ring(self.nside, ipix)
+            return other_class(ipix)
+        else:
+            return super(BaseHEALPixUnitSphericalRepresentation, self).represent_as(other_class)
+
+
+def HEALPixUnitSphericalRepresentation(nside, nest=False):
+    """
+    Look up the class for representation of points on a unit sphere in
+    HEALPix coordinates.
+
+    Parameters
+    ----------
+    nside : `int`
+        The HEALPix resolution.
+
+    nest : `bool`, optional, default `False`
+        The indexing scheme (`True` for "NESTED", `False` for "RING")
+
+    copy : bool, optional
+        If True arrays will be copied rather than referenced.
+    """
+
+    name = str('HEALPixUnitSphericalRepresentation'
+               + ('Nest' if nest else 'Ring') + str(nside))
+    try:
+        return REPRESENTATION_CLASSES[name.lower()]
+    except KeyError:
+        return MetaBaseHEALPixUnitSphericalRepresentation(
+            name, (BaseHEALPixUnitSphericalRepresentation, BaseRepresentation),
+            dict(nside=nside, nest=nest,
+            attr_classes=BaseHEALPixUnitSphericalRepresentation.attr_classes,
+            recommended_units=BaseHEALPixUnitSphericalRepresentation.recommended_units))
 
 
 class SphericalRepresentation(BaseRepresentation):
@@ -464,6 +630,8 @@ class SphericalRepresentation(BaseRepresentation):
                                r=self.distance)
         elif issubclass(other_class, UnitSphericalRepresentation):
             return other_class(lon=self.lon, lat=self.lat)
+        elif issubclass(other_class, BaseHEALPixUnitSphericalRepresentation):
+            return other_class(hp.ang2pix(other_class.nside, 0.5 * np.pi - self.lat.to(u.rad).value, self.lon.to(u.rad).value, other_class.nest))
         else:
             return super(SphericalRepresentation, self).represent_as(other_class)
 
@@ -593,6 +761,8 @@ class PhysicsSphericalRepresentation(BaseRepresentation):
                                distance=self.r)
         elif issubclass(other_class, UnitSphericalRepresentation):
             return other_class(lon=self.phi, lat=90 * u.deg - self.theta)
+        elif issubclass(other_class, BaseHEALPixUnitSphericalRepresentation):
+            return other_class(hp.ang2pix(other_class.nside, self.theta.to(u.rad).value, self.phi.to(u.rad).value, other_class.nest))
         else:
             return super(PhysicsSphericalRepresentation, self).represent_as(other_class)
 
